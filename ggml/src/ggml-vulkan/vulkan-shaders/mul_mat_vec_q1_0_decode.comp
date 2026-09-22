@@ -1,0 +1,71 @@
+#version 450
+
+#include "mul_mat_vec_base.glsl"
+
+layout(local_size_x_id = 0, local_size_y = 1, local_size_z = 1) in;
+
+void accumulate(inout float temp[NUM_COLS][NUM_ROWS], const uint first_row, const uint num_rows,
+                const uint col, const uint a_offset, const uint b_offset) {
+    const vec4 b0 = data_b_v4[(b_offset + col) / 4];
+    const vec4 b1 = data_b_v4[(b_offset + col) / 4 + 1];
+    const vec4 even = vec4(b0.x, b0.z, b1.x, b1.z);
+    const vec4 odd = vec4(b0.y, b0.w, b1.y, b1.w);
+    const uvec4 pair_sum = floatBitsToUint(even + odd);
+    const uvec4 pair_diff = floatBitsToUint(even - odd);
+    const uint row_stride = p.ncols / QUANT_K;
+    const uint iqs = (col % QUANT_K) / 8;
+    uint ib = a_offset + first_row * row_stride + col / QUANT_K;
+
+    [[unroll]] for (uint row = 0; row < num_rows; ++row) {
+        const float d = float(data_a[ib].d);
+        const uint bits = uint(data_a[ib].qs[iqs]);
+        ib += row_stride;
+
+        // Reuse pair sums across rows; unequal signs select the difference.
+        const bvec4 different = notEqual(uvec4(bits ^ (bits >> 1)) & uvec4(1, 4, 16, 64), uvec4(0));
+        const uvec4 signs = (uvec4(~bits) << uvec4(31, 29, 27, 25)) & uvec4(0x80000000u);
+        const vec4 pairs = uintBitsToFloat(mix(pair_sum, pair_diff, different) ^ signs);
+        const float sum = (pairs.x + pairs.y) + (pairs.z + pairs.w);
+        temp[0][row] = fma(d, sum, temp[0][row]);
+    }
+}
+
+void compute_outputs(const uint first_row, const uint num_rows) {
+    uint a_offset, b_offset, d_offset;
+    get_offsets(a_offset, b_offset, d_offset);
+
+    float temp[NUM_COLS][NUM_ROWS];
+    [[unroll]] for (uint row = 0; row < NUM_ROWS; ++row) {
+        temp[0][row] = 0.0f;
+    }
+
+    const uint tid = gl_LocalInvocationID.x;
+    const uint step = 8 * BLOCK_SIZE;
+    const uint unrolled_end = p.ncols / (4 * step) * (4 * step);
+    uint col = 8 * tid;
+
+    while (col < unrolled_end) {
+        [[unroll]] for (uint i = 0; i < 4; ++i) {
+            accumulate(temp, first_row, num_rows, col, a_offset, b_offset);
+            col += step;
+        }
+    }
+    while (col < p.ncols) {
+        accumulate(temp, first_row, num_rows, col, a_offset, b_offset);
+        col += step;
+    }
+
+    reduce_result(temp, d_offset, first_row, num_rows, tid);
+}
+
+void main() {
+    const uint first_row = NUM_ROWS * (gl_WorkGroupID.x + gl_NumWorkGroups.x * gl_WorkGroupID.z);
+    if (first_row >= p.stride_d) {
+        return;
+    }
+    if (p.stride_d - first_row >= NUM_ROWS) {
+        compute_outputs(first_row, NUM_ROWS);
+    } else {
+        compute_outputs(first_row, p.stride_d - first_row);
+    }
+}

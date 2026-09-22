@@ -773,6 +773,9 @@ void process_shaders() {
 
     std::map<std::string, std::string> base_dict = {{"FLOAT_TYPE", "float"}, {"FLOAT_TYPEV2", "vec2"}};
 
+    string_to_spv("mul_mat_vec_q1_0_decode_f32_f32_subgroup", "mul_mat_vec_q1_0_decode.comp", merge_maps(base_dict, {{"DATA_A_Q1_0", "1"}, {"B_TYPE", "float"}, {"B_TYPEV4", "vec4"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD", "1"}}));
+    string_to_spv("mul_mat_vec_q1_0_decode_f32_f32_subgroup_no_shmem", "mul_mat_vec_q1_0_decode.comp", merge_maps(base_dict, {{"DATA_A_Q1_0", "1"}, {"B_TYPE", "float"}, {"B_TYPEV4", "vec4"}, {"D_TYPE", "float"}, {"USE_SUBGROUP_ADD_NO_SHMEM", "1"}}));
+
     for (const auto& tname : type_names) {
         // mul mat vec
         std::string data_a_key = "DATA_A_" + to_uppercase(tname);

@@ -2707,6 +2707,28 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
     static constexpr uint32_t mul_mat_vec_num_bindings = 5;
     static constexpr uint32_t mul_mat_vec_id_num_bindings = 6;
 
+    // Keep the Q1_0 decode experiment scoped to Arc Pro B70.
+    const bool q1_0_decode = device->vendor_id == VK_VENDOR_ID_INTEL && device->properties.deviceID == 0xE223 &&
+                            device->subgroup_basic && use_subgroups && device->subgroup_size_control &&
+                            device->subgroup_require_full_support && subgroup_size == 16 &&
+                            getenv("GGML_VK_DISABLE_Q1_0_DECODE") == nullptr;
+    uint32_t q1_0_decode_rows = 8;
+    uint32_t q1_0_decode_wg = 0;
+    if (q1_0_decode) {
+        if (const char * value = getenv("GGML_VK_Q1_0_DECODE_ROWS")) {
+            if (strcmp(value, "2") == 0) q1_0_decode_rows = 2;
+            if (strcmp(value, "4") == 0) q1_0_decode_rows = 4;
+            if (strcmp(value, "8") == 0) q1_0_decode_rows = 8;
+            if (strcmp(value, "16") == 0) q1_0_decode_rows = 16;
+        }
+        if (const char * value = getenv("GGML_VK_Q1_0_DECODE_WG")) {
+            if (strcmp(value, "16") == 0) q1_0_decode_wg = 16;
+            if (strcmp(value, "32") == 0) q1_0_decode_wg = 32;
+            if (strcmp(value, "64") == 0) q1_0_decode_wg = 64;
+            if (strcmp(value, "128") == 0) q1_0_decode_wg = 128;
+        }
+    }
+
 #if defined(GGML_VULKAN_FLOAT_E2M1_GLSLC_SUPPORT) && defined(GGML_VULKAN_FLOAT_E4M3_GLSLC_SUPPORT)
 #define OCP_DMMV_LEN(NAME, REDUC)  (device->ocp_fp4 ? NAME ## _ocp_len[REDUC]  : NAME ## _len[REDUC])
 #define OCP_DMMV_DATA(NAME, REDUC) (device->ocp_fp4 ? NAME ## _ocp_data[REDUC] : NAME ## _data[REDUC])
@@ -2726,6 +2748,13 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
         const shader_reduction_mode reduc16 = (use_subgroups16 && w == DMMV_WG_SIZE_SUBGROUP) ? SHADER_REDUCTION_MODE_SUBGROUP :
                                               (use_subgroups16 && w == DMMV_WG_SIZE_LARGE) ? SHADER_REDUCTION_MODE_HYBRID :
                                               SHADER_REDUCTION_MODE_SHMEM;
+
+        if (q1_0_decode) {
+            const uint32_t wg = q1_0_decode_wg ? q1_0_decode_wg : wg_size_subgroup;
+            const uint64_t spv_len = wg == subgroup_size ? mul_mat_vec_q1_0_decode_f32_f32_subgroup_no_shmem_len : mul_mat_vec_q1_0_decode_f32_f32_subgroup_len;
+            const void * spv_data = wg == subgroup_size ? mul_mat_vec_q1_0_decode_f32_f32_subgroup_no_shmem_data : mul_mat_vec_q1_0_decode_f32_f32_subgroup_data;
+            ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_q1_0_decode_f32[w], "mul_mat_vec_q1_0_decode_f32_f32", spv_len, spv_data, "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {q1_0_decode_rows, 1, 1}, {wg, q1_0_decode_rows, 1}, 1, true, true, subgroup_size);
+        }
 
         for (uint32_t i = 0; i < mul_mat_vec_max_cols; ++i) {
             ggml_vk_create_pipeline(device, device->pipeline_dequant_mul_mat_vec_f32_f32[w][GGML_TYPE_F32 ][i], "mul_mat_vec_f32_f32_f32",  arr_dmmv_f32_f32_f32_len[reduc],  arr_dmmv_f32_f32_f32_data[reduc],  "main", mul_mat_vec_num_bindings, sizeof(vk_mat_vec_push_constants), {1, 1, 1}, {wg_size_subgroup, 1, i+1}, 1, false, use_subgroups, force_subgroup_size);
@@ -5371,6 +5400,11 @@ static vk_pipeline ggml_vk_get_dequantize_mul_mat_vec(ggml_backend_vk_context * 
             dmmv_wg = DMMV_WG_SIZE_SUBGROUP;
         }
         return ctx->device->pipeline_dequant_mul_mat_vec_q8_1_f32[dmmv_wg][a_type][num_cols-1];
+    }
+
+    if (a_type == GGML_TYPE_Q1_0 && b_type == GGML_TYPE_F32 && num_cols == 1 && k % 128 == 0 &&
+        ctx->device->pipeline_dequant_mul_mat_vec_q1_0_decode_f32[dmmv_wg]) {
+        return ctx->device->pipeline_dequant_mul_mat_vec_q1_0_decode_f32[dmmv_wg];
     }
 
     return b_type == GGML_TYPE_F32 ? ctx->device->pipeline_dequant_mul_mat_vec_f32_f32[dmmv_wg][a_type][num_cols-1] : ctx->device->pipeline_dequant_mul_mat_vec_f16_f32[dmmv_wg][a_type][num_cols-1];
